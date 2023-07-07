@@ -103,15 +103,18 @@ void loop()
 	// NewPing has a non-blocking version but it shouldn't be necessary because WebSockets are already async.
 	delay(100);
 
-	if (WiFi.status() != WL_CONNECTED)
+	if (WiFi.status() != WL_CONNECTED) {
+		digitalWrite(LED_BUILTIN, LOW);
 		return;
+	}
+	digitalWrite(LED_BUILTIN, HIGH);
 
 	for (uint8_t i = 0; i < COUNTOF(sonar); i++) {
 		auto distance = sonar[i].ping_cm();
 		memcpy(&wsBuffer[i * sizeof(distance)], &distance, sizeof(distance));
 
 		if (i < COUNTOF(sonar) - 1)
-			delay(50);
+			delay(30);
 	}
 	ws.binaryAll(wsBuffer, sizeof(wsBuffer));
 
