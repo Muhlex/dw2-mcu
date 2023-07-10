@@ -22,6 +22,8 @@ NewPing sonar[] = {
 const char *ssid = "glowingtides";
 const char *password = "supersecret";
 
+const char *discordWebhookUrl = "https://discord.com/api/webhooks/<id>/<token>";
+
 Adafruit_NeoPixel pixels(NUM_PIXELS, PIN_PIXELS, NEO_GRBW + NEO_KHZ800);
 
 AsyncWebServer server(80);
@@ -45,7 +47,7 @@ void processMatrix(void* arg) {
 		for (size_t i = 0; i < wsData.frameLength; i++) {
 			size_t offset = i + wsData.frameIndex;
 			if (offset >= NUM_PIXELS * NUM_PIXEL_COMPONENTS) {
-				Serial.println("Too many LED components, cannot write all bytes to pixels.");
+				// Serial.println("Too many LED components, cannot write all bytes to pixels.");
 				break;
 			}
 			uint8_t componentIndex = offset % NUM_PIXEL_COMPONENTS;
@@ -116,9 +118,12 @@ void setup()
 
 	Serial.begin(115200);
 	setCpuFrequencyMhz(240); // max clock speed on ESP32
-	pixels.begin();
 
 	pinMode(LED_BUILTIN, OUTPUT);
+	pixels.begin();
+
+	pixels.fill(pixels.Color(100, 0, 0, 0));
+	pixels.show();
 
 	WiFi.begin(ssid, password);
 	while (WiFi.status() != WL_CONNECTED) {
@@ -129,7 +134,7 @@ void setup()
 	Serial.println(WiFi.localIP());
 
 	HTTPClient http;
-	http.begin("https://discord.com/api/webhooks/<id>/<token>");
+	http.begin(discordWebhookUrl);
 	http.addHeader("Content-Type", "application/json");
 	auto httpResponseCode = http.POST("{ \"content\": \"" + WiFi.localIP().toString() + "\" }");
 	Serial.println("Webhook POSTed.");
@@ -141,6 +146,8 @@ void setup()
 	Serial.println("WebSocket server started.");
 
 	digitalWrite(LED_BUILTIN, HIGH);
+	pixels.fill(pixels.Color(0, 0, 100, 0));
+	pixels.show();
 }
 
 void loop()
