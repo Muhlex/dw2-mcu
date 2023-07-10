@@ -1,12 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <ESPAsyncWebServer.h>
 #include <Adafruit_NeoPixel.h>
 #include <NewPing.h>
 
 #define COUNTOF(x) (sizeof(x) / sizeof(*x))
 
-#define MAX_SONAR_DISTANCE 400
+#define MAX_SONAR_DISTANCE 300
 
 #define NUM_PIXELS 300
 #define NUM_PIXEL_COMPONENTS 4
@@ -14,12 +15,12 @@
 #define PIN_PIXELS 23
 NewPing sonar[] = {
 	NewPing(18, 19, MAX_SONAR_DISTANCE),
-	NewPing(/* 25, 26, */18, 19, MAX_SONAR_DISTANCE),
-	NewPing(/* 32, 33, */18, 19, MAX_SONAR_DISTANCE),
+	NewPing(25, 26, MAX_SONAR_DISTANCE),
+	NewPing(32, 33, MAX_SONAR_DISTANCE),
 };
 
-const char *ssid = "";
-const char *password = "";
+const char *ssid = "glowingtides";
+const char *password = "supersecret";
 
 Adafruit_NeoPixel pixels(NUM_PIXELS, PIN_PIXELS, NEO_GRBW + NEO_KHZ800);
 
@@ -27,7 +28,47 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/");
 
 uint8_t components [NUM_PIXEL_COMPONENTS] {};
-uint8_t wsBuffer[sizeof(unsigned long) * COUNTOF(sonar)] {}; // distance value * number of sensors
+uint8_t renderBuffer[sizeof(unsigned long) * COUNTOF(sonar)] {}; // distance value * number of sensors
+QueueHandle_t renderQueue;
+struct ws_data_t {
+	uint64_t frameIndex;
+	size_t frameLength;
+	uint64_t messageLength;
+	uint8_t *data;
+};
+
+void processMatrix(void* arg) {
+	while (true) {
+		ws_data_t wsData;
+		if (!xQueueReceive(renderQueue, &wsData, portMAX_DELAY)) continue;
+
+		for (size_t i = 0; i < wsData.frameLength; i++) {
+			size_t offset = i + wsData.frameIndex;
+			if (offset >= NUM_PIXELS * NUM_PIXEL_COMPONENTS) {
+				Serial.println("Too many LED components, cannot write all bytes to pixels.");
+				break;
+			}
+			uint8_t componentIndex = offset % NUM_PIXEL_COMPONENTS;
+			size_t pixelIndex = offset / NUM_PIXEL_COMPONENTS;
+
+			components[componentIndex] = wsData.data[i];
+			// Serial.printf("%u#%u->%02x ", pixelIndex, componentIndex, data[i]);
+
+			if (componentIndex == NUM_PIXEL_COMPONENTS - 1) { // last component of a pixel
+				pixels.setPixelColor(pixelIndex, components[0], components[1], components[2], components[3]);
+			}
+		}
+		// Serial.printf("\n");
+
+		// Serial.printf("--frame-end\n");
+		if ((wsData.frameIndex + wsData.frameLength) == wsData.messageLength) { // last frame in message
+			pixels.show();
+			// Serial.printf("--message-end\n");
+		}
+
+		free(wsData.data);
+	}
+}
 
 void onEvent(
 	AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
@@ -43,29 +84,22 @@ void onEvent(
 		case WS_EVT_DATA: {
 			AwsFrameInfo *info = (AwsFrameInfo*)arg;
 			if (info->opcode != WS_TEXT) {
-				for (size_t i = 0; i < len; i++) {
-					size_t offset = i + info->index;
-					if (offset >= NUM_PIXELS * NUM_PIXEL_COMPONENTS) {
-						Serial.println("Too many LED components, cannot write all bytes to pixels.");
-						break;
-					}
-					uint8_t componentIndex = offset % NUM_PIXEL_COMPONENTS;
-					size_t pixelIndex = offset / NUM_PIXEL_COMPONENTS;
-
-					components[componentIndex] = data[i];
-					// Serial.printf("%u#%u->%02x ", pixelIndex, componentIndex, data[i]);
-
-					if (componentIndex == NUM_PIXEL_COMPONENTS - 1) { // last component of a pixel
-						pixels.setPixelColor(pixelIndex, components[0], components[1], components[2], components[3]);
-						memset(components, 0, sizeof(components));
-					}
+				ws_data_t wsData;
+				if (xQueueReceive(renderQueue, &wsData, 0)) {
+					free(wsData.data);
+					// Serial.println("Dropped (part of) a matrix frame!");
 				}
-				// Serial.printf("\n");
-			}
-			// Serial.printf("--frame-end\n");
-			if ((info->index + len) == info->len) { // last frame in message
-				pixels.show();
-				// Serial.printf("--message-end\n");
+				wsData.frameIndex = info->index;
+				wsData.frameLength = len;
+				wsData.messageLength = info->len;
+				uint8_t *dataCopy = (uint8_t *) malloc(sizeof(uint8_t) * len);
+				if (dataCopy == nullptr) {
+					// Serial.println("Cannot send matrix to render queue, out of memory.");
+					break;
+				}
+				memcpy(dataCopy, data, sizeof(uint8_t) * len);
+				wsData.data = dataCopy;
+				xQueueOverwrite(renderQueue, &wsData);
 			}
 			break;
 		}
@@ -77,6 +111,9 @@ void onEvent(
 
 void setup()
 {
+	renderQueue = xQueueCreate(1, sizeof(ws_data_t));
+	xTaskCreate(processMatrix, "processMatrix", 4096, nullptr, tskIDLE_PRIORITY, nullptr);
+
 	Serial.begin(115200);
 	setCpuFrequencyMhz(240); // max clock speed on ESP32
 	pixels.begin();
@@ -91,9 +128,17 @@ void setup()
 	Serial.print("Connected. Device IP: ");
 	Serial.println(WiFi.localIP());
 
+	HTTPClient http;
+	http.begin("https://discord.com/api/webhooks/<id>/<token>");
+	http.addHeader("Content-Type", "application/json");
+	auto httpResponseCode = http.POST("{ \"content\": \"" + WiFi.localIP().toString() + "\" }");
+	Serial.println("Webhook POSTed.");
+	http.end();
+
 	ws.onEvent(onEvent);
 	server.addHandler(&ws);
 	server.begin();
+	Serial.println("WebSocket server started.");
 
 	digitalWrite(LED_BUILTIN, HIGH);
 }
@@ -101,7 +146,6 @@ void setup()
 void loop()
 {
 	// NewPing has a non-blocking version but it shouldn't be necessary because WebSockets are already async.
-	delay(100);
 
 	if (WiFi.status() != WL_CONNECTED) {
 		digitalWrite(LED_BUILTIN, LOW);
@@ -110,13 +154,11 @@ void loop()
 	digitalWrite(LED_BUILTIN, HIGH);
 
 	for (uint8_t i = 0; i < COUNTOF(sonar); i++) {
-		auto distance = sonar[i].ping_cm();
-		memcpy(&wsBuffer[i * sizeof(distance)], &distance, sizeof(distance));
-
-		if (i < COUNTOF(sonar) - 1)
-			delay(30);
+		delay(50);
+		unsigned long distance = sonar[i].ping_cm();
+		memcpy(&renderBuffer[i * sizeof(distance)], &distance, sizeof(distance));
 	}
-	ws.binaryAll(wsBuffer, sizeof(wsBuffer));
+	ws.binaryAll(renderBuffer, sizeof(renderBuffer));
 
 	ws.cleanupClients();
 }
